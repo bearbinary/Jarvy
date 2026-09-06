@@ -133,8 +133,8 @@ impl RollbackManager {
     fn restore_backup(backup: &Path, target: &Path) -> Result<(), UpdateError> {
         // `fs::copy` wrote INTO the running executable, which Linux refuses
         // with ETXTBSY ("Text file busy") — the rollback target IS the
-        // binary executing this code. Use the same atomic temp-rename dance
-        // as `Installer::replace_binary`. Found by release-paths Path 4 on
+        // binary executing this code. Use the same two-rename swap as
+        // `Installer::replace_binary`. Found by release-paths Path 4 on
         // v0.6.2 — the first run in which that path ever executed.
         #[cfg(unix)]
         {
@@ -147,10 +147,16 @@ impl RollbackManager {
                 .map_err(|e| UpdateError::RollbackFailed(e.to_string()))?;
         }
 
-        self_update::Move::from_source(backup)
-            .replace_using_temp(target)
-            .to_dest(target)
-            .map_err(|e| UpdateError::RollbackFailed(format!("Restore failed: {}", e)))?;
+        let staged = crate::update::installer::stage_beside(backup, target)
+            .map_err(|e| UpdateError::RollbackFailed(e.to_string()))?;
+
+        if let Err(e) = crate::update::installer::swap_into_place(&staged, target) {
+            let _ = fs::remove_file(&staged);
+            return Err(UpdateError::RollbackFailed(format!(
+                "Restore failed: {}",
+                e
+            )));
+        }
 
         Ok(())
     }
@@ -168,6 +174,39 @@ pub struct RollbackResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn restore_backup_stages_backup_before_swap() {
+        let backup_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let backup = backup_dir.path().join("jarvy-backup");
+        let target = target_dir.path().join("jarvy");
+        fs::write(&backup, b"backup").unwrap();
+        fs::write(&target, b"current").unwrap();
+
+        RollbackManager::restore_backup(&backup, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"backup");
+        assert!(!target_dir.path().join("jarvy.new").exists());
+        assert!(
+            backup.exists(),
+            "restore should copy the backup, not consume it"
+        );
+    }
+
+    #[test]
+    fn restore_backup_deletes_staged_new_when_swap_fails() {
+        let backup_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let backup = backup_dir.path().join("jarvy-backup");
+        let target = target_dir.path().join("jarvy");
+        fs::write(&backup, b"backup").unwrap();
+
+        assert!(RollbackManager::restore_backup(&backup, &target).is_err());
+
+        assert!(!target_dir.path().join("jarvy.new").exists());
+    }
 
     #[test]
     fn test_rollback_info_serialization() {

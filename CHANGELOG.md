@@ -27,6 +27,61 @@ for the full release process and
 [`docs/release-quirks-jarvy.md`](https://github.com/Cliftonz/jarvy/blob/main/docs/release-quirks-jarvy.md)
 for divergences from generic release skills.
 
+## [v0.8.3] — In-house update swap, WSL-aware diagnostics (2026-09-06)
+
+**Changed:**
+
+- Drop the `self_update` crate; binary replacement is now an in-house
+  two-rename swap. `jarvy update` first copies the downloaded binary to
+  `<target>.new` beside the install target, so the rename that follows
+  never crosses a filesystem boundary; the old path renamed straight out
+  of the staging directory, which on a Linux box with a tmpfs `/tmp`
+  failed with EXDEV and aborted the update outright. From there it renames
+  the running binary to `<target>.old`, renames `<target>.new` into place,
+  and renames the old one back if that second step fails (if even the
+  rename-back fails, the error names both paths so the binary can be
+  recovered by hand). Unix deletes `<target>.old` once the swap lands;
+  Windows keeps it, because a running executable can't be unlinked there,
+  and the next update replaces the stale sibling. Rollback runs the same
+  swap through the same `<target>.new` staging copy, so restoring a backup
+  from `~/.jarvy/backup` no longer requires the backup directory and the
+  install directory to sit on one filesystem; the backup file is copied
+  rather than moved, so it survives the restore. Removing the dependency
+  also took quick-xml out of the tree, so the two RUSTSEC quick-xml
+  advisory ignores are gone from `deny.toml`.
+- The Windows Defender retry loop keeps its 5 attempts and 500ms-to-4s
+  backoff, but now gives up the moment an attempt strands the install:
+  when the new binary failed to land and the old one couldn't be renamed
+  back, retrying can only bury the real diagnostic. The error naming both
+  paths is what the user sees, instead of a generic not-found reported by
+  a later attempt.
+
+**Features:**
+
+- Detect WSL at runtime by reading `/proc/version` once and memoizing the
+  result. Non-Linux targets always report not-WSL, and an unreadable file
+  counts as not-WSL rather than failing.
+- `jarvy services` preflight now prints a WSL-specific hint when the Docker
+  daemon is unreachable inside a distro: enable Docker Desktop's WSL
+  integration, or start a native daemon with `sudo systemctl start docker`.
+  Reported as `hint_kind = "wsl_docker_desktop"`.
+- Telemetry carries a bounded `env_kind = "wsl" | "native"` next to every
+  `platform` field and OTLP attribute (`tool.*`, `setup.started`,
+  `setup.inventory`, the maintenance probe metrics, the `jarvy.setup` span,
+  the telemetry disclosure events, and `mcp_register.auto_detected`), so a
+  Linux binary running inside a distro is distinguishable from one on bare
+  metal. Purely additive; `platform` is unchanged.
+
+**Docs:**
+
+- Add a local-LLM example (ollama + graphify) under `examples/`.
+
+**Internal:**
+
+- Pass `GITHUB_TOKEN` to the `installer-e2e` unix CI job.
+- Bump the VS Code extension's transitive `fast-uri` to 3.1.7 for the open
+  Dependabot advisories.
+
 ## [v0.8.2] — Windows dev-env fixes, config parent-dir search, 17 new tools (2026-09-02)
 
 **Features — tools:**

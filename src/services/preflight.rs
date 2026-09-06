@@ -109,7 +109,7 @@ pub(crate) fn probe_with_args(cli: &str, args: &[&str], timeout: Duration) -> Da
 /// Bounded taxonomy of hint branches surfaced on `services.daemon_down`.
 /// Product analytics uses this to answer "colima vs Docker Desktop —
 /// which suggestion do users see most, and where should we invest?"
-/// Cardinality: 6.
+/// Cardinality: 7.
 pub type HintKind = &'static str;
 
 /// Build a platform-aware, actionable hint for a stopped Docker daemon,
@@ -120,21 +120,44 @@ pub type HintKind = &'static str;
 ///    Docker; probing it on non-macOS is wasted subprocess).
 /// 2. macOS → Docker Desktop.
 /// 3. Windows → Docker Desktop.
-/// 4. Linux → systemd (`sudo systemctl start docker`).
+/// 4. WSL → mention both Docker Desktop's WSL integration toggle and a
+///    native-in-distro systemd service, since jarvy can't tell which one
+///    the user has from inside WSL alone.
+/// 5. Linux → systemd (`sudo systemctl start docker`).
 pub fn docker_daemon_hint() -> (String, HintKind) {
-    if cfg!(target_os = "macos") && command_on_path("colima") {
+    resolve_docker_daemon_hint(
+        cfg!(target_os = "macos"),
+        cfg!(target_os = "windows"),
+        command_on_path("colima"),
+        crate::tools::common::is_wsl(),
+    )
+}
+
+fn resolve_docker_daemon_hint(
+    is_macos: bool,
+    is_windows: bool,
+    has_colima: bool,
+    is_wsl: bool,
+) -> (String, HintKind) {
+    if is_macos && has_colima {
         return ("Start Colima with: colima start".to_string(), "colima");
     }
-    if cfg!(target_os = "macos") {
+    if is_macos {
         return (
             "Start Docker Desktop from Applications, then retry.".to_string(),
             "docker_desktop_macos",
         );
     }
-    if cfg!(target_os = "windows") {
+    if is_windows {
         return (
             "Start Docker Desktop from the Start menu, then retry.".to_string(),
             "docker_desktop_windows",
+        );
+    }
+    if is_wsl {
+        return (
+            "If using Docker Desktop, enable WSL integration for this distro (Docker Desktop → Settings → Resources → WSL Integration). If running Docker natively inside WSL, start it with: sudo systemctl start docker".to_string(),
+            "wsl_docker_desktop",
         );
     }
     (
@@ -197,6 +220,7 @@ mod tests {
             "colima",
             "docker_desktop_macos",
             "docker_desktop_windows",
+            "wsl_docker_desktop",
             "systemd",
             "podman_machine",
             "podman_socket",
@@ -204,6 +228,50 @@ mod tests {
         for (_, kind) in [docker_daemon_hint(), podman_daemon_hint()] {
             assert!(known.contains(&kind), "unknown hint_kind emitted: {kind}");
         }
+    }
+
+    #[test]
+    fn resolve_docker_daemon_hint_wsl_suggests_both_integration_paths() {
+        let (hint, kind) = resolve_docker_daemon_hint(false, false, false, true);
+        assert_eq!(kind, "wsl_docker_desktop");
+        assert!(
+            hint.to_lowercase().contains("wsl integration")
+                || hint.to_lowercase().contains("docker desktop")
+        );
+        assert!(hint.to_lowercase().contains("systemctl"));
+    }
+
+    #[test]
+    fn resolve_docker_daemon_hint_bare_linux_still_suggests_systemd() {
+        let (_, kind) = resolve_docker_daemon_hint(false, false, false, false);
+        assert_eq!(kind, "systemd");
+    }
+
+    #[test]
+    fn resolve_docker_daemon_hint_macos_with_colima_suggests_colima() {
+        let (_, kind) = resolve_docker_daemon_hint(true, false, true, false);
+        assert_eq!(kind, "colima");
+    }
+
+    #[test]
+    fn resolve_docker_daemon_hint_macos_without_colima_suggests_docker_desktop() {
+        let (_, kind) = resolve_docker_daemon_hint(true, false, false, false);
+        assert_eq!(kind, "docker_desktop_macos");
+    }
+
+    #[test]
+    fn resolve_docker_daemon_hint_windows_suggests_docker_desktop() {
+        let (_, kind) = resolve_docker_daemon_hint(false, true, false, false);
+        assert_eq!(kind, "docker_desktop_windows");
+    }
+
+    #[test]
+    fn resolve_docker_daemon_hint_windows_wins_over_wsl_flag() {
+        // is_windows and is_wsl both true is not a real combo in production
+        // (is_wsl() only ever returns true on a Linux-target build), but the
+        // branch order should still resolve deterministically: Windows wins.
+        let (_, kind) = resolve_docker_daemon_hint(false, true, false, true);
+        assert_eq!(kind, "docker_desktop_windows");
     }
 
     #[test]
