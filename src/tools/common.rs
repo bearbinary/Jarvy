@@ -940,7 +940,9 @@ mod command_failure_stderr_tests {
 
 #[cfg(test)]
 mod wsl_detect_tests {
-    use super::{is_wsl, proc_version_file_indicates_wsl, proc_version_indicates_wsl};
+    #[cfg(not(target_os = "linux"))]
+    use super::is_wsl;
+    use super::{proc_version_file_indicates_wsl, proc_version_indicates_wsl};
 
     #[test]
     #[cfg(not(target_os = "linux"))]
