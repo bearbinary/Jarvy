@@ -417,13 +417,26 @@ impl BinaryInstaller {
                 .map_err(|e| UpdateError::InstallationFailed(e.to_string()))?;
         }
 
-        // Use self_update for atomic replacement. On Windows the rename
-        // can transiently fail with "Access is denied" while Defender /
-        // an indexer holds a handle on the freshly extracted binary
-        // (issue #63). The original 3×(500ms,1s) backoff still lost to a
+        // Stage the new binary as a `<target>.new` sibling before swapping.
+        // `new_binary` lives under the staging dir (often tmpfs), so a
+        // straight rename into the install dir can fail with EXDEV. Copying
+        // beside `target` first keeps the swap itself a same-filesystem
+        // rename. `fs::copy` carries over the executable bit set above, so
+        // no extra chmod is needed on `staged`.
+        let staged = stage_beside(new_binary, target)
+            .map_err(|e| UpdateError::InstallationFailed(e.to_string()))?;
+
+        // Two-rename swap (`swap_into_place`): the running binary is moved
+        // aside to `<target>.old` and the new one renamed into place. On
+        // Windows a running executable can be renamed but not deleted or
+        // overwritten, which is why the old binary is left as a sibling on
+        // Windows rather than replaced in place. The rename can still
+        // transiently fail with "Access is denied" while Defender / an
+        // indexer holds a handle on the freshly extracted binary (issue
+        // #63). The original 3 attempts at 500ms and 1s still lost to a
         // Defender scan on the v0.6.4-rc.1 release-paths run, so: 5
-        // attempts, exponential 500ms→4s (~7.5s worst-case total), and
-        // each retry prints — silent retries made it impossible to tell
+        // attempts, exponential 500ms to 4s (about 7.5s worst-case total),
+        // and each retry prints; silent retries made it impossible to tell
         // from CI logs whether the backoff fired at all. Unix renames
         // don't contend with scanners; one attempt.
         let attempts: u32 = if cfg!(windows) { 5 } else { 1 };
@@ -439,14 +452,17 @@ impl BinaryInstaller {
                 );
                 std::thread::sleep(delay);
             }
-            match self_update::Move::from_source(new_binary)
-                .replace_using_temp(target)
-                .to_dest(target)
-            {
+            match swap_into_place(&staged, target) {
                 Ok(()) => return Ok(()),
-                Err(e) => last_err = Some(e),
+                Err(e) => {
+                    last_err = Some(e);
+                    if swap_is_stranded(target) {
+                        break;
+                    }
+                }
             }
         }
+        let _ = fs::remove_file(&staged);
         Err(UpdateError::InstallationFailed(
             last_err.map(|e| e.to_string()).unwrap_or_default(),
         ))
@@ -468,8 +484,9 @@ impl BinaryInstaller {
     fn restore_backup(&self, backup: &Path, target: &Path) -> Result<(), UpdateError> {
         // Same ETXTBSY hazard as `Rollback::restore_backup`: the restore
         // target is the running executable, so `fs::copy` into it fails on
-        // Linux. Atomic temp-rename via self_update, matching
-        // `replace_binary`. Consumes the backup file.
+        // Linux. Two-rename swap via `swap_into_place`, matching
+        // `replace_binary`. Copies the backup file; the original stays in
+        // place.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -481,13 +498,74 @@ impl BinaryInstaller {
                 .map_err(|e| UpdateError::RollbackFailed(e.to_string()))?;
         }
 
-        self_update::Move::from_source(backup)
-            .replace_using_temp(target)
-            .to_dest(target)
-            .map_err(|e| UpdateError::RollbackFailed(format!("Restore failed: {}", e)))?;
+        let staged =
+            stage_beside(backup, target).map_err(|e| UpdateError::RollbackFailed(e.to_string()))?;
+
+        if let Err(e) = swap_into_place(&staged, target) {
+            let _ = fs::remove_file(&staged);
+            return Err(UpdateError::RollbackFailed(format!(
+                "Restore failed: {}",
+                e
+            )));
+        }
 
         Ok(())
     }
+}
+
+/// The previous `target` is moved to a `<target>.old` sibling; unix removes
+/// it best-effort once the new binary is in place, Windows keeps it because
+/// a running executable cannot be unlinked there. Two renames instead of a
+/// delete-then-rename: a running executable can be renamed on every
+/// platform, but Windows refuses to delete or overwrite it, and Linux
+/// refuses to write into it (ETXTBSY). A stale `.old` from an earlier swap
+/// is replaced.
+pub(crate) fn swap_into_place(source: &Path, target: &Path) -> io::Result<()> {
+    let old = sibling_with_suffix(target, ".old");
+    fs::rename(target, &old)?;
+    match fs::rename(source, target) {
+        Ok(()) => {
+            #[cfg(unix)]
+            let _ = fs::remove_file(&old);
+            Ok(())
+        }
+        Err(cause) => match fs::rename(&old, target) {
+            Ok(()) => Err(cause),
+            Err(_) => Err(stranded_error(cause, &old, target)),
+        },
+    }
+}
+
+/// Keeps the eventual `swap_into_place` a same-filesystem rename even when
+/// `source` lives elsewhere (tmpfs staging dir, or the backup dir).
+pub(crate) fn stage_beside(source: &Path, target: &Path) -> io::Result<PathBuf> {
+    let staged = sibling_with_suffix(target, ".new");
+    fs::copy(source, &staged)?;
+    Ok(staged)
+}
+
+fn swap_is_stranded(target: &Path) -> bool {
+    !target.exists()
+}
+
+fn sibling_with_suffix(target: &Path, suffix: &str) -> PathBuf {
+    let mut name = target
+        .file_name()
+        .expect("update target is a file path")
+        .to_os_string();
+    name.push(suffix);
+    target.with_file_name(name)
+}
+
+fn stranded_error(cause: io::Error, old: &Path, target: &Path) -> io::Error {
+    io::Error::new(
+        cause.kind(),
+        format!(
+            "failed to install new binary: {cause}; the previous binary is at {} and could not be moved back, rename it to {} manually",
+            old.display(),
+            target.display()
+        ),
+    )
 }
 
 /// Walk every entry under `dest_canon` and verify the canonicalized path is
@@ -615,6 +693,172 @@ mod tests {
         // Just verify installer can be created
         let installer = BinaryInstaller::new();
         assert!(installer.is_ok());
+    }
+
+    #[test]
+    fn replace_binary_stages_new_binary_before_swap() {
+        let installer = BinaryInstaller::new().unwrap();
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let new_binary = source_dir.path().join("jarvy.new");
+        let target = target_dir.path().join("jarvy");
+        fs::write(&new_binary, b"new").unwrap();
+        fs::write(&target, b"old").unwrap();
+
+        installer.replace_binary(&new_binary, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert!(
+            new_binary.exists(),
+            "staging should copy the source, not consume it"
+        );
+        assert!(!target_dir.path().join("jarvy.new").exists());
+        #[cfg(unix)]
+        assert!(!target_dir.path().join("jarvy.old").exists());
+    }
+
+    #[test]
+    fn replace_binary_deletes_staged_new_when_swap_gives_up() {
+        let installer = BinaryInstaller::new().unwrap();
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let new_binary = source_dir.path().join("jarvy.new");
+        let target = target_dir.path().join("jarvy");
+        fs::write(&new_binary, b"new").unwrap();
+
+        assert!(installer.replace_binary(&new_binary, &target).is_err());
+
+        assert!(!target_dir.path().join("jarvy.new").exists());
+    }
+
+    #[test]
+    fn restore_backup_stages_backup_before_swap() {
+        let installer = BinaryInstaller::new().unwrap();
+        let backup_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let backup = backup_dir.path().join("jarvy-backup");
+        let target = target_dir.path().join("jarvy");
+        fs::write(&backup, b"backup").unwrap();
+        fs::write(&target, b"current").unwrap();
+
+        installer.restore_backup(&backup, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"backup");
+        assert!(!target_dir.path().join("jarvy.new").exists());
+        assert!(
+            backup.exists(),
+            "restore should copy the backup, not consume it"
+        );
+    }
+
+    #[test]
+    fn restore_backup_deletes_staged_new_when_swap_fails() {
+        let installer = BinaryInstaller::new().unwrap();
+        let backup_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let backup = backup_dir.path().join("jarvy-backup");
+        let target = target_dir.path().join("jarvy");
+        fs::write(&backup, b"backup").unwrap();
+
+        assert!(installer.restore_backup(&backup, &target).is_err());
+
+        assert!(!target_dir.path().join("jarvy.new").exists());
+    }
+
+    #[test]
+    fn swap_into_place_moves_new_binary_and_keeps_old_as_sibling() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("jarvy.exe");
+        let source = dir.path().join("jarvy.new");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&source, b"new").unwrap();
+
+        swap_into_place(&source, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        #[cfg(windows)]
+        assert_eq!(fs::read(dir.path().join("jarvy.exe.old")).unwrap(), b"old");
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn swap_into_place_replaces_stale_old_sibling() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("jarvy");
+        let source = dir.path().join("jarvy.new");
+        let old_sibling = sibling_with_suffix(&target, ".old");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&source, b"new").unwrap();
+        fs::write(&old_sibling, b"stale").unwrap();
+
+        swap_into_place(&source, &target).unwrap();
+
+        #[cfg(windows)]
+        assert_eq!(fs::read(&old_sibling).unwrap(), b"old");
+        #[cfg(unix)]
+        assert!(!old_sibling.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swap_into_place_deletes_old_sibling_on_unix_after_success() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("jarvy");
+        let source = dir.path().join("jarvy.new");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&source, b"new").unwrap();
+
+        swap_into_place(&source, &target).unwrap();
+
+        assert!(!sibling_with_suffix(&target, ".old").exists());
+    }
+
+    #[test]
+    fn swap_is_stranded_true_when_target_missing() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("jarvy");
+
+        assert!(swap_is_stranded(&target));
+    }
+
+    #[test]
+    fn swap_is_stranded_false_when_target_present() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("jarvy");
+        fs::write(&target, b"old").unwrap();
+
+        assert!(!swap_is_stranded(&target));
+    }
+
+    #[test]
+    fn swap_into_place_restores_target_when_source_missing() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("jarvy");
+        let source = dir.path().join("jarvy.new");
+        fs::write(&target, b"old").unwrap();
+
+        assert!(swap_into_place(&source, &target).is_err());
+
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert!(!sibling_with_suffix(&target, ".old").exists());
+    }
+
+    #[test]
+    fn stranded_error_names_old_path_and_target() {
+        let cause = io::Error::new(io::ErrorKind::PermissionDenied, "access is denied");
+        let old = Path::new("/opt/jarvy/jarvy.old");
+        let target = Path::new("/opt/jarvy/jarvy");
+
+        let err = stranded_error(cause, old, target);
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let msg = err.to_string();
+        assert!(msg.contains("/opt/jarvy/jarvy.old"), "{msg}");
+        assert!(
+            msg.contains("rename it to /opt/jarvy/jarvy manually"),
+            "{msg}"
+        );
+        assert!(msg.contains("access is denied"), "{msg}");
     }
 
     // ----- verify_no_tar_escape (round-2 QA F5).

@@ -1,6 +1,6 @@
 [package]
 name = "jarvy"
-version = "0.8.2"
+version = "0.8.3"
 license = "MIT OR Apache-2.0"
 edition = "2024"
 rust-version = "1.88"
@@ -80,7 +80,6 @@ hostname = "0.4"
 sys-info = "0.9"
 num_cpus = "1.16"
 chrono = { version = "0.4", features = ["serde"] }
-self_update = { version = "1.0.0-rc.6", default-features = false, features = ["ureq", "rustls", "archive-tar", "compression-tar-gz"] }
 sha2 = "0.11"
 hex = "0.4"
 shellexpand = "3.1"

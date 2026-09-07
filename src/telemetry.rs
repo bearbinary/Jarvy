@@ -543,6 +543,16 @@ pub fn config() -> Option<&'static TelemetryConfig> {
     TELEMETRY.get().map(|s| &s.config)
 }
 
+/// Bounded sibling to the `platform` field: distinguishes a WSL distro from
+/// bare-metal Linux, which `env::consts::OS` alone cannot.
+pub fn env_kind() -> &'static str {
+    if crate::tools::common::is_wsl() {
+        "wsl"
+    } else {
+        "native"
+    }
+}
+
 // ============================================================================
 // Event Functions - Tool Operations
 // ============================================================================
@@ -559,6 +569,7 @@ pub fn tool_requested(tool: &str, version: &str, source: Source) {
         version = %version,
         source = %source,
         platform = %env::consts::OS,
+        env_kind = %env_kind(),
     );
 
     if let Some(state) = TELEMETRY.get()
@@ -570,6 +581,7 @@ pub fn tool_requested(tool: &str, version: &str, source: Source) {
                 KeyValue::new("tool", tool.to_string()),
                 KeyValue::new("source", source.to_string()),
                 KeyValue::new("platform", env::consts::OS.to_string()),
+                KeyValue::new("env_kind", env_kind().to_string()),
             ],
         );
     }
@@ -598,6 +610,7 @@ pub fn tool_installed(tool: &str, version: &str, package_manager: &str, duration
         toolchain_bootstrapped = %toolchain_bootstrapped,
         duration_ms = %duration_ms,
         platform = %env::consts::OS,
+        env_kind = %env_kind(),
     );
 
     if let Some(state) = TELEMETRY.get()
@@ -607,6 +620,7 @@ pub fn tool_installed(tool: &str, version: &str, package_manager: &str, duration
             KeyValue::new("tool", tool.to_string()),
             KeyValue::new("pm", package_manager.to_string()),
             KeyValue::new("platform", env::consts::OS.to_string()),
+            KeyValue::new("env_kind", env_kind().to_string()),
             KeyValue::new("status", "success"),
             KeyValue::new("category", category.to_string()),
             KeyValue::new("install_route", install_route),
@@ -665,6 +679,7 @@ pub fn tool_already_installed(
         source = %source,
         prompted_user = %prompted_user,
         platform = %env::consts::OS,
+        env_kind = %env_kind(),
     );
 
     if let Some(state) = TELEMETRY.get()
@@ -675,6 +690,7 @@ pub fn tool_already_installed(
             &[
                 KeyValue::new("tool", tool.to_string()),
                 KeyValue::new("platform", env::consts::OS.to_string()),
+                KeyValue::new("env_kind", env_kind().to_string()),
                 KeyValue::new("status", "already_installed"),
                 KeyValue::new("detection_method", detection_method.to_string()),
                 KeyValue::new("source", source.to_string()),
@@ -714,6 +730,7 @@ pub fn tool_failed_with_kind(tool: &str, version: &str, error_kind: &str, error:
         install_route = %install_route,
         error = %redacted_error,
         platform = %env::consts::OS,
+        env_kind = %env_kind(),
     );
 
     if let Some(state) = TELEMETRY.get()
@@ -724,6 +741,7 @@ pub fn tool_failed_with_kind(tool: &str, version: &str, error_kind: &str, error:
             &[
                 KeyValue::new("tool", tool.to_string()),
                 KeyValue::new("platform", env::consts::OS.to_string()),
+                KeyValue::new("env_kind", env_kind().to_string()),
                 KeyValue::new("status", "failed"),
                 KeyValue::new("error_kind", error_kind.to_string()),
                 KeyValue::new("category", category.to_string()),
@@ -765,6 +783,7 @@ pub fn tool_not_supported(tool: &str, _version: Option<&str>, source: Source) {
                 KeyValue::new("tool", safe.into_owned()),
                 KeyValue::new("source", source.to_string()),
                 KeyValue::new("platform", env::consts::OS.to_string()),
+                KeyValue::new("env_kind", env_kind().to_string()),
             ],
         );
     }
@@ -788,6 +807,7 @@ pub fn emit_tool_unsupported_probe(raw: &str, source: Source) {
             tool = %safe,
             source = %source,
             platform = %env::consts::OS,
+            env_kind = %env_kind(),
         );
     }
     tool_not_supported(&safe, None, source);
@@ -854,6 +874,7 @@ pub fn tool_request_explicit(tool: &str, _suggestions: &[String]) -> bool {
                 KeyValue::new("tool", tool.to_string()),
                 KeyValue::new("source", Source::Request.to_string()),
                 KeyValue::new("platform", env::consts::OS.to_string()),
+                KeyValue::new("env_kind", env_kind().to_string()),
             ],
         );
         return true;
@@ -892,6 +913,7 @@ pub fn setup_started(tools_count: usize) {
         event = "setup.started",
         tools_count = %tools_count,
         platform = %env::consts::OS,
+        env_kind = %env_kind(),
     );
 }
 
@@ -958,6 +980,7 @@ pub fn setup_inventory(
         config_source = %redact_path(config_source),
         machine_id = %machine_id.unwrap_or("unknown"),
         platform = %env::consts::OS,
+        env_kind = %env_kind(),
     );
 
     if let Some(state) = TELEMETRY.get()
@@ -968,6 +991,7 @@ pub fn setup_inventory(
             &[
                 KeyValue::new("machine_id", machine_id.unwrap_or("unknown").to_string()),
                 KeyValue::new("platform", env::consts::OS.to_string()),
+                KeyValue::new("env_kind", env_kind().to_string()),
             ],
         );
     }
@@ -993,6 +1017,7 @@ pub fn maintenance_stale_tools(count: u64, machine_id: Option<&str>) {
             &[
                 KeyValue::new("machine_id", machine_id.unwrap_or("unknown").to_string()),
                 KeyValue::new("platform", env::consts::OS.to_string()),
+                KeyValue::new("env_kind", env_kind().to_string()),
             ],
         );
     }
@@ -1019,6 +1044,7 @@ pub fn maintenance_backend_failed(
                 KeyValue::new("backend", backend),
                 KeyValue::new("error_kind", error_kind),
                 KeyValue::new("platform", env::consts::OS.to_string()),
+                KeyValue::new("env_kind", env_kind().to_string()),
             ],
         );
         metrics.maintenance_probe_duration.record(
@@ -1027,6 +1053,7 @@ pub fn maintenance_backend_failed(
                 KeyValue::new("backend", backend),
                 KeyValue::new("outcome", error_kind),
                 KeyValue::new("platform", env::consts::OS.to_string()),
+                KeyValue::new("env_kind", env_kind().to_string()),
             ],
         );
     }
@@ -1048,6 +1075,7 @@ pub fn maintenance_backend_probed(backend: &'static str, duration: Duration) {
                 KeyValue::new("backend", backend),
                 KeyValue::new("outcome", "ok"),
                 KeyValue::new("platform", env::consts::OS.to_string()),
+                KeyValue::new("env_kind", env_kind().to_string()),
             ],
         );
     }
@@ -1527,7 +1555,12 @@ macro_rules! telemetry_span {
 
 /// Create a setup span
 pub fn span_setup(tools_count: usize) -> tracing::Span {
-    tracing::info_span!("jarvy.setup", tools_count = tools_count, platform = %env::consts::OS)
+    tracing::info_span!(
+        "jarvy.setup",
+        tools_count = tools_count,
+        platform = %env::consts::OS,
+        env_kind = %env_kind()
+    )
 }
 
 /// Create a version check span
@@ -1633,6 +1666,7 @@ pub fn disclosure_shown(trigger: &str) {
         event = "telemetry.disclosure_shown",
         trigger = %trigger,
         platform = %env::consts::OS,
+        env_kind = %env_kind(),
     );
 }
 
@@ -1649,6 +1683,7 @@ pub fn undecided_nudge_shown() {
     tracing::info!(
         event = "telemetry.undecided_nudge_shown",
         platform = %env::consts::OS,
+        env_kind = %env_kind(),
     );
 }
 
@@ -1870,6 +1905,7 @@ pub fn mcp_register_auto_detected(detected: &[crate::mcp_register::McpAgentTarge
         count = %detected.len(),
         agents = %slugs.join(","),
         platform = %env::consts::OS,
+        env_kind = %env_kind(),
     );
 }
 
@@ -2298,5 +2334,14 @@ mod tests {
         assert_eq!(summary.tools_skipped, 0);
         assert_eq!(summary.tools_failed, 0);
         assert_eq!(summary.hooks_run, 0);
+    }
+
+    #[test]
+    fn env_kind_returns_bounded_value() {
+        let kind = env_kind();
+        assert!(
+            kind == "wsl" || kind == "native",
+            "unexpected env_kind: {kind}"
+        );
     }
 }

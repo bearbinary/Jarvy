@@ -112,4 +112,4 @@ jarvy update disable          # Disable auto-checks
 
 - Source: `src/update/`
 - Key types: `UpdateConfig`, `Channel`, `InstallMethod`, `UpdateChecker`, `BinaryInstaller`, `RollbackManager`
-- Crate: [`self_update`](https://crates.io/crates/self_update) for binary swap; GitHub Releases REST for version discovery
+- Binary swap: in-house two-rename `swap_into_place` (old binary moved to `<target>.old`, new binary renamed into place; unix deletes `.old` afterwards, Windows keeps it); GitHub Releases REST for version discovery

@@ -18,18 +18,6 @@ all-features = true
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-ignore = [
-    # quick-xml < 0.41 DoS advisories, pulled in via self_update 0.44's
-    # archive-tar feature (self_update pins quick-xml 0.38.x; the patched
-    # 0.41 only ships with the unreleased self_update 1.0 RCs). Jarvy's
-    # exposure is nil in practice: we call only self_update::Move on
-    # LOCAL files we downloaded + checksum/cosign-verified ourselves —
-    # the quick-xml parse paths (XML from remote endpoints) never
-    # execute. Revisit when self_update 1.0 stabilizes (tracked in the
-    # security follow-up issue).
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic attr check — parse path unused by jarvy (Move-only usage of self_update)" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml NsReader allocation DoS — parse path unused by jarvy (Move-only usage of self_update)" },
-]
 
 # License configuration - compatible with MIT/Apache-2.0
 # All licenses are denied unless explicitly allowed (deny-by-default)
